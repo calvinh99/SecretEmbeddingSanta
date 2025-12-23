@@ -1,29 +1,26 @@
 // Main Bun Server - HTTP + WebSocket
 
-import { networkInterfaces } from 'os';
+import { networkInterfaces } from 'node:os';
 import type { ServerWebSocket } from 'bun';
-import type { ClientMessage, ServerMessage } from './types';
 import {
+  checkGameEnd,
   createRoom,
-  getRoom,
+  endGame,
   getAllRooms,
+  getGameState,
+  getRoom,
+  getRoomByPlayerId,
+  getRoomState,
   joinRoom,
   leaveRoom,
-  submitGift,
   startGame,
+  submitGift,
+  updateGiftPositions,
   updatePlayerGuess,
   usePetrificus,
   useSpy,
-  updateGiftPositions,
-  checkGameEnd,
-  endGame,
-  getRoomState,
-  getGameState,
-  getRoomByPlayerId,
-  markPlayerDisconnected,
-  markPlayerConnected,
-  cleanupDisconnectedPlayers,
 } from './game-state';
+import type { ClientMessage, ServerMessage } from './types';
 
 const PORT = 3000;
 
@@ -56,14 +53,18 @@ interface WSData {
 const connections = new Map<string, ServerWebSocket<WSData>>();
 
 function generatePlayerId(): string {
-  return 'p_' + Math.random().toString(36).substring(2, 9);
+  return `p_${Math.random().toString(36).substring(2, 9)}`;
 }
 
 function send(ws: ServerWebSocket<WSData>, message: ServerMessage): void {
   ws.send(JSON.stringify(message));
 }
 
-function broadcastToRoom(roomId: string, message: ServerMessage, excludePlayerId?: string): void {
+function broadcastToRoom(
+  roomId: string,
+  message: ServerMessage,
+  excludePlayerId?: string,
+): void {
   const room = getRoom(roomId);
   if (!room) return;
 
@@ -76,13 +77,8 @@ function broadcastToRoom(roomId: string, message: ServerMessage, excludePlayerId
   }
 }
 
-// Timeout settings for disconnected players
-const WAITING_TIMEOUT_MS = 10_000; // 10 seconds in waiting room
-const PLAYING_TIMEOUT_MS = 60_000; // 60 seconds during gameplay
-
 // Game loop - runs every 50ms (20fps)
 let lastTick = Date.now();
-let lastCleanupTick = Date.now();
 setInterval(() => {
   const now = Date.now();
   const deltaTime = (now - lastTick) / 1000;
@@ -93,22 +89,6 @@ setInterval(() => {
     const room = getRoom(roomInfo.id);
     if (!room) continue;
 
-    // Cleanup disconnected players every 1 second
-    if (now - lastCleanupTick > 1000) {
-      const removed = cleanupDisconnectedPlayers(room.id, WAITING_TIMEOUT_MS, PLAYING_TIMEOUT_MS);
-      if (removed.length > 0) {
-        log(`Cleaned up ${removed.length} disconnected player(s) from "${room.name}"`);
-        const updatedRoom = getRoom(room.id);
-        if (updatedRoom) {
-          broadcastToRoom(room.id, { type: 'room_state', room: getRoomState(updatedRoom) });
-          // Update room list for everyone
-          for (const conn of connections.values()) {
-            send(conn, { type: 'room_list', rooms: getAllRooms() });
-          }
-        }
-      }
-    }
-
     if (room.phase !== 'playing') continue;
 
     // Update gift positions
@@ -117,25 +97,30 @@ setInterval(() => {
     // Check for game end
     if (checkGameEnd(room)) {
       const results = endGame(room);
-      log(`Game ended: "${room.name}" - ${results.length} players assigned gifts`);
+      log(
+        `Game ended: "${room.name}" - ${results.length} players assigned gifts`,
+      );
       for (const result of results) {
-        log(`  ${result.playerName} receives "${result.giftDescription.slice(0, 30)}..." from ${result.giftOwnerName}`);
+        log(
+          `  ${result.playerName} receives "${result.giftDescription.slice(0, 30)}..." from ${result.giftOwnerName}`,
+        );
       }
       broadcastToRoom(room.id, { type: 'game_end', results });
     } else {
       // Broadcast game state
-      broadcastToRoom(room.id, { type: 'game_state', state: getGameState(room) });
+      broadcastToRoom(room.id, {
+        type: 'game_state',
+        state: getGameState(room),
+      });
     }
-  }
-
-  // Update cleanup tick
-  if (now - lastCleanupTick > 1000) {
-    lastCleanupTick = now;
   }
 }, 50);
 
 // Handle WebSocket messages
-async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage): Promise<void> {
+async function handleMessage(
+  ws: ServerWebSocket<WSData>,
+  message: ClientMessage,
+): Promise<void> {
   const playerId = ws.data.playerId;
 
   switch (message.type) {
@@ -145,9 +130,12 @@ async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage
     }
 
     case 'create_room': {
-      const room = createRoom(playerId, message.hostName, message.roomName, message.settings);
-      // Update the host's WebSocket reference (was null during creation)
-      markPlayerConnected(playerId, ws as any);
+      const room = createRoom(
+        playerId,
+        message.hostName,
+        message.roomName,
+        message.settings,
+      );
       log(`Room created: "${room.name}" (${room.id}) by ${message.hostName}`);
       send(ws, { type: 'room_joined', roomId: room.id, playerId });
       // Broadcast room state to the host (they're already in the room)
@@ -160,16 +148,22 @@ async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage
     }
 
     case 'join_room': {
-      const result = joinRoom(message.roomId, playerId, message.playerName, ws as any);
+      const result = joinRoom(message.roomId, playerId, message.playerName);
       if (result.success && result.room) {
         log(`Player "${message.playerName}" joined room "${result.room.name}"`);
         send(ws, { type: 'room_joined', roomId: result.room.id, playerId });
-        broadcastToRoom(result.room.id, { type: 'room_state', room: getRoomState(result.room) });
+        broadcastToRoom(result.room.id, {
+          type: 'room_state',
+          room: getRoomState(result.room),
+        });
         for (const conn of connections.values()) {
           send(conn, { type: 'room_list', rooms: getAllRooms() });
         }
       } else {
-        send(ws, { type: 'error', message: result.error || 'Failed to join room' });
+        send(ws, {
+          type: 'error',
+          message: result.error || 'Failed to join room',
+        });
       }
       break;
     }
@@ -185,7 +179,10 @@ async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage
         // Notify remaining players
         const updatedRoom = getRoom(roomId);
         if (updatedRoom) {
-          broadcastToRoom(roomId, { type: 'room_state', room: getRoomState(updatedRoom) });
+          broadcastToRoom(roomId, {
+            type: 'room_state',
+            room: getRoomState(updatedRoom),
+          });
         }
 
         // Update room list for everyone
@@ -201,10 +198,16 @@ async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage
       if (result.success) {
         const room = getRoomByPlayerId(playerId);
         if (room) {
-          broadcastToRoom(room.id, { type: 'room_state', room: getRoomState(room) });
+          broadcastToRoom(room.id, {
+            type: 'room_state',
+            room: getRoomState(room),
+          });
         }
       } else {
-        send(ws, { type: 'error', message: result.error || 'Failed to submit gift' });
+        send(ws, {
+          type: 'error',
+          message: result.error || 'Failed to submit gift',
+        });
       }
       break;
     }
@@ -217,21 +220,31 @@ async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage
     case 'use_petrificus': {
       const result = usePetrificus(playerId, message.giftId);
       if (!result.success) {
-        send(ws, { type: 'error', message: result.error || 'Failed to use Petrificus' });
+        send(ws, {
+          type: 'error',
+          message: result.error || 'Failed to use Petrificus',
+        });
       }
       break;
     }
 
     case 'use_spy': {
       const result = useSpy(playerId, message.targetPlayerId);
-      if (result.success) {
+      if (
+        result.success &&
+        result.targetName &&
+        result.targetGuess !== undefined
+      ) {
         send(ws, {
           type: 'spy_result',
-          targetName: result.targetName!,
-          targetGuess: result.targetGuess!,
+          targetName: result.targetName,
+          targetGuess: result.targetGuess,
         });
       } else {
-        send(ws, { type: 'error', message: result.error || 'Failed to use Spy' });
+        send(ws, {
+          type: 'error',
+          message: result.error || 'Failed to use Spy',
+        });
       }
       break;
     }
@@ -243,20 +256,37 @@ async function handleMessage(ws: ServerWebSocket<WSData>, message: ClientMessage
         break;
       }
       if (room.hostId !== playerId) {
-        send(ws, { type: 'error', message: 'Only the host can start the game' });
+        send(ws, {
+          type: 'error',
+          message: 'Only the host can start the game',
+        });
         break;
       }
       const result = await startGame(room.id);
       if (result.success) {
         log(`Game started: "${room.name}" with ${room.players.size} players`);
-        broadcastToRoom(room.id, { type: 'room_state', room: getRoomState(room) });
-        broadcastToRoom(room.id, { type: 'game_state', state: getGameState(room) });
+        broadcastToRoom(room.id, {
+          type: 'room_state',
+          room: getRoomState(room),
+        });
+        broadcastToRoom(room.id, {
+          type: 'game_state',
+          state: getGameState(room),
+        });
       } else {
-        send(ws, { type: 'error', message: result.error || 'Failed to start game' });
+        send(ws, {
+          type: 'error',
+          message: result.error || 'Failed to start game',
+        });
       }
       break;
     }
 
+    case 'ping': {
+      // Respond with pong to keep connection alive
+      send(ws, { type: 'pong' });
+      break;
+    }
   }
 }
 
@@ -283,7 +313,9 @@ const server = Bun.serve<WSData>({
 
     // WebSocket upgrade
     if (url.pathname === '/ws') {
+      // Always generate new playerId (no reconnection support)
       const playerId = generatePlayerId();
+
       const success = server.upgrade(req, { data: { playerId } });
       if (success) {
         return undefined;
@@ -296,8 +328,11 @@ const server = Bun.serve<WSData>({
   },
   websocket: {
     open(ws) {
-      connections.set(ws.data.playerId, ws);
-      send(ws, { type: 'connected', playerId: ws.data.playerId });
+      const playerId = ws.data.playerId;
+      connections.set(playerId, ws);
+
+      // Always a new connection (no reconnection support)
+      send(ws, { type: 'connected', playerId });
       send(ws, { type: 'room_list', rooms: getAllRooms() });
     },
     async message(ws, message) {
@@ -315,15 +350,19 @@ const server = Bun.serve<WSData>({
       connections.delete(playerId);
 
       if (room) {
-        // Mark player as disconnected instead of immediately removing
-        // This allows them to reconnect within the timeout period
-        markPlayerDisconnected(playerId);
-        log(`Player disconnected: ${playerId} from room "${room.name}" (can reconnect)`);
+        // Immediately remove player from room (no reconnection support)
+        const roomId = room.id;
+        const roomName = room.name;
+        leaveRoom(playerId);
+        log(`Player ${playerId} left room "${roomName}"`);
 
-        // Notify remaining players about the disconnection
-        const updatedRoom = getRoom(room.id);
+        // Notify remaining players
+        const updatedRoom = getRoom(roomId);
         if (updatedRoom) {
-          broadcastToRoom(room.id, { type: 'room_state', room: getRoomState(updatedRoom) });
+          broadcastToRoom(roomId, {
+            type: 'room_state',
+            room: getRoomState(updatedRoom),
+          });
         }
 
         // Update room list for everyone

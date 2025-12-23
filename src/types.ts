@@ -16,9 +16,6 @@ export interface Player {
   petrificusRemaining: number;
   spyRemaining: number;
   position: { x: number; y: number }; // position on circle
-  ws: WebSocket | null;
-  connected: boolean;
-  disconnectedAt: number | null;
 }
 
 export interface Gift {
@@ -46,14 +43,20 @@ export interface Room {
 
 export type ClientMessage =
   | { type: 'get_rooms' }
-  | { type: 'create_room'; roomName: string; hostName: string; settings: RoomSettings }
+  | {
+      type: 'create_room';
+      roomName: string;
+      hostName: string;
+      settings: RoomSettings;
+    }
   | { type: 'join_room'; roomId: string; playerName: string }
   | { type: 'leave_room' }
   | { type: 'submit_gift'; giftDescription: string }
   | { type: 'update_guess'; guess: string }
   | { type: 'use_petrificus'; giftId: string }
   | { type: 'use_spy'; targetPlayerId: string }
-  | { type: 'start_game' };
+  | { type: 'start_game' }
+  | { type: 'ping' };
 
 export type ServerMessage =
   | { type: 'connected'; playerId: string }
@@ -63,7 +66,8 @@ export type ServerMessage =
   | { type: 'game_state'; state: GameStatePayload }
   | { type: 'spy_result'; targetName: string; targetGuess: string }
   | { type: 'game_end'; results: GameResult[] }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'pong' };
 
 export interface RoomInfo {
   id: string;
